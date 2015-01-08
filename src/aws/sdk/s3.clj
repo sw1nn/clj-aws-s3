@@ -1,19 +1,29 @@
 (ns aws.sdk.s3
   "Functions to access the Amazon S3 storage service.
 
-  Each function takes a map of credentials as its first argument. The
-  credentials map should contain an :access-key key and a :secret-key key,
-  optionally an :endpoint key to denote an AWS endpoint and optionally a :proxy
-  key to define a HTTP proxy to go through.
+  Each function takes a map as its first argument. The map should contain
+  either an instance of an AWSCredentialsProvider via the :provider key or
+  both :access-key-id and :secret-access-key keys.
+
+  If provider is supplied other supplied credentials will be ignored.
+
+  Additionally optional keys are supported:
+          :session-token - a session token, requires access-key-id and secret-key
+          :endpoint key to denote an AWS endpoint
+          :proxy key to define a HTTP proxy to go through.
 
   The :proxy key must contain keys for :host and :port, and may contain keys
-  for :user, :password, :domain and :workstation."
+  for :user, :password, :domain and :workstation.
+
+  Note that :access-key, secret-key and token keys are supported for backwards compatibility,
+  but are considered deprecated."
   (:require [clojure.string :as str]
             [clj-time.core :as t]
             [clj-time.coerce :as coerce]
             [clojure.walk :as walk])
   (:import com.amazonaws.auth.BasicAWSCredentials
            com.amazonaws.auth.BasicSessionCredentials
+           com.amazonaws.auth.AWSCredentialsProvider
            com.amazonaws.services.s3.AmazonS3Client
            com.amazonaws.AmazonServiceException
            com.amazonaws.ClientConfiguration
@@ -49,6 +59,26 @@
            java.io.InputStream
            java.nio.charset.Charset))
 
+(defrecord BasicCredentialsProvider [access-key-id secret-access-key session-token]
+  AWSCredentialsProvider
+  (getCredentials [_]
+    (if session-token
+      (BasicSessionCredentials. access-key-id secret-access-key session-token)
+      (BasicAWSCredentials. access-key-id secret-access-key)))
+  (refresh [_]))
+
+(defn- creds-provider [{:keys [access-key-id access-key
+                               secret-access-key secret-key
+                               session-token token
+                               provider]}]
+  (cond
+   provider provider
+   ;; support 'old' names for aws creds for backwards compatibility.
+   access-key-id (->BasicCredentialsProvider (or access-key-id access-key)
+                                             (or secret-access-key secret-key)
+                                             (or session-token token))
+   :else nil))
+
 (defn- s3-client*
   [cred]
   (let [client-configuration (ClientConfiguration.)]
@@ -72,12 +102,9 @@
       (.setProxyDomain client-configuration proxy-domain))
     (when-let [proxy-workstation (get-in cred [:proxy :workstation])]
       (.setProxyWorkstation client-configuration proxy-workstation))
-    (let [aws-creds
-          (if (:token cred)
-            (BasicSessionCredentials. (:access-key cred) (:secret-key cred) (:token cred))
-            (BasicAWSCredentials. (:access-key cred) (:secret-key cred)))
-
-          client (AmazonS3Client. aws-creds client-configuration)]
+    (let [client (if [creds-provider (creds-provider cred)]
+                   (AmazonS3Client. creds-provider client-configuration)
+                   (AmazonS3Client. client-configuration))]
       (when-let [endpoint (:endpoint cred)]
         (.setEndpoint client endpoint))
       client)))
